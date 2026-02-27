@@ -1,12 +1,38 @@
 #!/bin/bash
-# MÓDULO: AUDITORIA SSH
-# Toda saída deve passar pela função central de log `log` definida em main.sh (se disponível).
 
-# Segurança e opções
+############################################################
+# MÓDULO: ACCESS / SSH AUDIT
+#
+# Objetivo:
+# Verificar aderência às políticas de acesso remoto via SSH,
+# garantindo que o sistema não esteja exposto a riscos
+# relacionados a autenticação fraca ou privilégios excessivos.
+#
+# Risco Mitigado:
+# - Login remoto direto como root
+# - Autenticação por senha habilitada
+# - Acesso amplo sem restrição explícita
+# - Serviço SSH ativo com configuração insegura
+#
+# Arquitetura:
+# - Toda saída passa pela função central de log `log`
+# - O módulo retorna código numérico de severidade
+# - O main.sh deve consolidar a severidade global
+############################################################
+
 set -euo pipefail
 
-# ---- Logging e severidade local (módulo independente) ----
-# Formato de log consistente para integração com main
+############################################################
+# SEVERIDADE
+#
+# 0 = OK
+# 1 = INFO
+# 2 = WARNING
+# 3 = CRITICAL
+#
+# O módulo mantém a maior severidade encontrada.
+############################################################
+
 log() {
     local level="${1:-INFO}" msg="${2:-}"
     local ts
@@ -14,9 +40,8 @@ log() {
     printf "%s [%s] %s\n" "$ts" "$level" "$msg"
 }
 
-
-# Severidade: 0=OK,1=INFO,2=WARNING,3=CRITICAL
 severity=0
+
 set_severity() {
     local v="$1"
     if ! [[ "$v" =~ ^[0-3]$ ]]; then return 0; fi
@@ -25,9 +50,6 @@ set_severity() {
     fi
 }
 
- # Não há mais modo verbose: sempre loga uma linha por controle
-
-# Helper local para log com nivel derivado da severidade
 log_level_from() {
     case "$1" in
         0) echo OK;;
@@ -38,22 +60,20 @@ log_level_from() {
     esac
 }
 
-# Severity numeric mapping: 0=OK, 1=INFO, 2=WARNING, 3=CRITICAL
-severity_name() {
-    case "$1" in
-        0) echo OK;;
-        1) echo INFO;;
-        2) echo WARNING;;
-        3) echo CRITICAL;;
-        *) echo UNKNOWN;;
-    esac
-}
+############################################################
+# COLETA DE CONFIGURAÇÃO
+#
+# Agrega:
+# - /etc/ssh/sshd_config
+# - /etc/ssh/sshd_config.d/*.conf
+#
+# Remove comentários e linhas vazias.
+############################################################
 
-# Aggregate config from sshd_config and sshd_config.d
 gather_sshd_config() {
     local tmp
     tmp=$(mktemp)
-    # Verifica se o arquivo existe e é legível antes de tentar ler
+
     if [ -f /etc/ssh/sshd_config ]; then
         if [ -r /etc/ssh/sshd_config ]; then
             sed -n 's/#.*$//; /^[[:space:]]*$/d; p' /etc/ssh/sshd_config >> "$tmp" || true
@@ -61,6 +81,7 @@ gather_sshd_config() {
             log "WARNING" "SSH: sem permissão para ler /etc/ssh/sshd_config"
         fi
     fi
+
     if [ -d /etc/ssh/sshd_config.d ]; then
         for f in /etc/ssh/sshd_config.d/*.conf; do
             [ -e "$f" ] || continue
@@ -71,22 +92,19 @@ gather_sshd_config() {
             fi
         done
     fi
+
     cat "$tmp"
     rm -f "$tmp"
 }
 
-
-# Busca valor explícito da diretiva (última ocorrência)
 parse_directive() {
     local key="$1"
     awk -v k="$key" 'BEGIN{IGNORECASE=1} toupper($1)==toupper(k){v=$2} END{if(v)print v}'
 }
 
-# Determina valor efetivo (explícito ou padrão do sshd)
 get_effective_value() {
     local key="$1"; shift
     local explicit="$1"; shift
-    # Defaults do OpenSSH 8.x+ (ajustar se necessário)
     case "$key" in
         PermitRootLogin) echo "${explicit:-prohibit-password}";;
         PasswordAuthentication) echo "${explicit:-yes}";;
@@ -95,59 +113,106 @@ get_effective_value() {
 }
 
 main() {
+
     local cfg
     cfg=$(gather_sshd_config)
 
-    # --- CONTROLE 1: PermitRootLogin ---
+    ############################################################
+    # CONTROLE 1 — ROOT LOGIN REMOTO
+    #
+    # Pergunta:
+    # O root pode realizar login remoto via SSH?
+    #
+    # Critério:
+    # - CRITICAL se PermitRootLogin=yes
+    # - OK se no ou prohibit-password
+    # - WARNING se valor inesperado
+    ############################################################
+
     local explicit_prl effective_prl level_prl msg_prl
+
     explicit_prl=$(printf "%s" "$cfg" | parse_directive PermitRootLogin || true)
     effective_prl=$(get_effective_value PermitRootLogin "$explicit_prl")
+
     if [ "$effective_prl" = "yes" ]; then
-        level_prl=3; msg_prl="SSH: PermitRootLogin=YES ($( [ -n \"$explicit_prl\" ] && echo 'definido manualmente' || echo 'usando padrão do sistema' ), CRITICAL)"
+        level_prl=3
+        msg_prl="SSH: PermitRootLogin=YES (CRITICAL)"
     elif [ "$effective_prl" = "no" ] || [ "$effective_prl" = "prohibit-password" ]; then
-        if [ -n "$explicit_prl" ]; then
-            level_prl=0; msg_prl="SSH: PermitRootLogin=${effective_prl^^} (definido manualmente, seguro)"
-        else
-            level_prl=1; msg_prl="SSH: PermitRootLogin=${effective_prl^^} (usando padrão do sistema, seguro)"
-        fi
+        level_prl=0
+        msg_prl="SSH: PermitRootLogin=${effective_prl^^} (seguro)"
     else
-        level_prl=2; msg_prl="SSH: PermitRootLogin=${effective_prl} ($( [ -n \"$explicit_prl\" ] && echo 'definido manualmente' || echo 'usando padrão do sistema' ), valor inesperado)"
+        level_prl=2
+        msg_prl="SSH: PermitRootLogin=${effective_prl} (valor inesperado)"
     fi
+
     set_severity "$level_prl"
     log "$(log_level_from "$level_prl")" "$msg_prl"
 
-    # --- CONTROLE 2: PasswordAuthentication ---
+
+    ############################################################
+    # CONTROLE 2 — AUTENTICAÇÃO POR SENHA
+    #
+    # Pergunta:
+    # PasswordAuthentication está habilitado?
+    #
+    # Critério:
+    # - WARNING se yes
+    # - OK se no
+    ############################################################
+
     local explicit_pass effective_pass level_pass msg_pass
+
     explicit_pass=$(printf "%s" "$cfg" | parse_directive PasswordAuthentication || true)
     effective_pass=$(get_effective_value PasswordAuthentication "$explicit_pass")
+
     if [ "$effective_pass" = "no" ]; then
-        if [ -n "$explicit_pass" ]; then
-            level_pass=0; msg_pass="SSH: PasswordAuthentication=NO (definido manualmente, seguro)"
-        else
-            level_pass=1; msg_pass="SSH: PasswordAuthentication=NO (usando padrão do sistema, seguro)"
-        fi
-    elif [ "$effective_pass" = "yes" ]; then
-        level_pass=2; msg_pass="SSH: PasswordAuthentication=YES ($( [ -n \"$explicit_pass\" ] && echo 'definido manualmente' || echo 'usando padrão do sistema' ), WARNING)"
+        level_pass=0
+        msg_pass="SSH: PasswordAuthentication=NO (seguro)"
     else
-        level_pass=2; msg_pass="SSH: PasswordAuthentication=${effective_pass} ($( [ -n \"$explicit_pass\" ] && echo 'definido manualmente' || echo 'usando padrão do sistema' ), valor inesperado)"
+        level_pass=2
+        msg_pass="SSH: PasswordAuthentication=YES (WARNING)"
     fi
+
     set_severity "$level_pass"
     log "$(log_level_from "$level_pass")" "$msg_pass"
 
-    # --- CONTROLE 3: AllowUsers / AllowGroups ---
+
+    ############################################################
+    # CONTROLE 3 — RESTRIÇÃO DE USUÁRIOS
+    #
+    # Pergunta:
+    # Existe AllowUsers ou AllowGroups?
+    #
+    # Critério:
+    # - INFO se não definido (acesso amplo)
+    # - OK se definido
+    ############################################################
+
     local allow_users allow_groups level_allow msg_allow
+
     allow_users=$(printf "%s" "$cfg" | parse_directive AllowUsers || true)
     allow_groups=$(printf "%s" "$cfg" | parse_directive AllowGroups || true)
+
     if [ -z "$allow_users" ] && [ -z "$allow_groups" ]; then
-        level_allow=1; msg_allow="SSH: Nenhum AllowUsers ou AllowGroups definido (acesso amplo, usando padrão do sistema)"
+        level_allow=1
+        msg_allow="SSH: Nenhum AllowUsers/AllowGroups definido (acesso amplo)"
     else
-        level_allow=0; msg_allow="SSH: Acesso restrito via AllowUsers/AllowGroups (explícito)"
+        level_allow=0
+        msg_allow="SSH: Acesso restrito configurado"
     fi
+
     set_severity "$level_allow"
     log "$(log_level_from "$level_allow")" "$msg_allow"
 
-    # --- CONTROLE 4: Serviço sshd ativo ---
+
+    ############################################################
+    # CONTROLE 4 — SERVIÇO SSH ATIVO
+    #
+    # Verifica se o sshd está ativo no sistema.
+    ############################################################
+
     local active=no level_srv msg_srv
+
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet sshd 2>/dev/null || systemctl is-active --quiet ssh 2>/dev/null; then
             active=yes
@@ -157,16 +222,25 @@ main() {
             active=yes
         fi
     fi
+
     if [ "$active" = yes ]; then
-        level_srv=1; msg_srv="SSH: serviço sshd ativo"
-        if [ "$severity" -eq 0 ]; then set_severity 1; fi
+        level_srv=1
+        msg_srv="SSH: serviço sshd ativo"
     else
-        level_srv=0; msg_srv="SSH: serviço sshd não ativo"
+        level_srv=0
+        msg_srv="SSH: serviço sshd não ativo"
     fi
+
+    set_severity "$level_srv"
     log "$(log_level_from "$level_srv")" "$msg_srv"
 
-    # Resumo final
-    log "$(log_level_from "$severity")" "SSH: severidade final = $(log_level_from "$severity") (code=$severity)"
+
+    ############################################################
+    # RESUMO FINAL DO MÓDULO
+    ############################################################
+
+    log "$(log_level_from "$severity")" \
+        "SSH: severidade final = $(log_level_from "$severity") (code=$severity)"
 
     exit "$severity"
 }

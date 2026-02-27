@@ -1,24 +1,49 @@
 #!/bin/bash
 
 ############################################################
-# MÓDULO: USERS AUDIT
+# MÓDULO: IDENTITY / USERS AUDIT
 #
 # Objetivo:
 # Verificar aderência à política de menor privilégio
-# relacionada a usuários do sistema.
+# relacionada à identidade e privilégios de usuários.
 #
 # Risco Mitigado:
 # - Escalada de privilégio indevida
 # - Contas administrativas não autorizadas
-# - Contas humanas não previstas
-# - Contas de serviço com acesso interativo indevido
+# - Contas humanas fora do baseline definido
+# - Contas de sistema com acesso interativo indevido
+#
+# Arquitetura:
+# - Coleta informações via getent (compatível com LDAP/SSSD)
+# - Classifica usuários humanos e administrativos
+# - Valida contra baseline opcional
+# - Registra anomalias estruturadas em log
+# - Retorna exit code baseado na maior severidade encontrada
 ############################################################
 
 set -euo pipefail
 
+############################################################
+# PARÂMETROS E CONFIGURAÇÃO
+#
+# HUMAN_UID_MIN:
+#   UID mínimo considerado humano.
+#
+# HUMAN_UID_MAX:
+#   UID máximo opcional (evita limite arbitrário por padrão).
+#
+# ADMIN_MAX:
+#   Número máximo aceitável de contas administrativas.
+#
+# BASELINE_FILE:
+#   Arquivo contendo usuários administrativos autorizados.
+#
+# WRITE_BASELINE:
+#   Permite gerar baseline inicial a partir do estado atual.
+############################################################
+
 # Defaults
 HUMAN_UID_MIN=${HUMAN_UID_MIN:-1000}
-# Leave HUMAN_UID_MAX empty by default to avoid arbitrary upper bound
 HUMAN_UID_MAX=${HUMAN_UID_MAX:-}
 ADMIN_MAX=${ADMIN_MAX:-3}
 BASELINE_FILE=""
@@ -26,15 +51,15 @@ WRITE_BASELINE=""
 
 usage(){
 	cat <<EOF
-Usage: $0 [-b baseline_file] [-m max_admins] [-u min_human_uid] [-x max_human_uid] [-w write_baseline]
+Uso: $0 [-b arquivo_baseline] [-m max_admins] [-u min_human_uid] [-x max_human_uid] [-w write_baseline]
 
-Options:
-	-b baseline_file   File with one authorized admin username per line
-	-m max_admins      Threshold for number of admins (default: $ADMIN_MAX)
-	-u min_human_uid   Minimum UID considered human (default: $HUMAN_UID_MIN)
-	-x max_human_uid   Maximum UID considered human (default: no upper bound)
-	-w write_baseline   Write current admin list to given file (overwrites)
-	-h                 Show this help
+Opções:
+	-b arquivo_baseline   Arquivo com um usuário administrador autorizado por linha
+	-m max_admins         Limite para número de administradores (padrão: $ADMIN_MAX)
+	-u min_human_uid      UID mínimo considerado humano (padrão: $HUMAN_UID_MIN)
+	-x max_human_uid      UID máximo considerado humano (padrão: sem limite superior)
+	-w write_baseline     Grava a lista atual de administradores no arquivo informado (sobrescreve)
+	-h                    Mostra esta ajuda
 EOF
 	exit 1
 }
@@ -51,14 +76,34 @@ while getopts ":b:m:u:x:w:h" opt; do
 	esac
 done
 
+############################################################
+# DEFINIÇÃO DE SHELLS INTERATIVOS
+#
+# SHELL_WHITELIST:
+#   Define shells considerados interativos (indicativo de
+#   conta humana).
+#
+# NOLOGIN_PATTERNS:
+#   Padrões típicos de shells não interativas.
+############################################################
+
 SHELL_WHITELIST=(/bin/bash /bin/sh /bin/zsh /bin/ksh /usr/bin/bash /usr/bin/zsh)
 NOLOGIN_PATTERNS=(/sbin/nologin /usr/sbin/nologin /bin/false /usr/bin/false)
 
-# Note: parsing sudoers/sudoers.d here aims to detect broad administrative access
-# (users/groups allowed to run ALL). This does NOT parse the full sudoers grammar
-# (Aliases, Cmnd_Alias, Host_Alias, complex RunAs restrictions, or command-limited
-# entries). The module reports users with wide sudo capabilities; restricted sudo
-# grants (single commands) may not be detected.
+############################################################
+# OBSERVAÇÃO IMPORTANTE SOBRE SUDOERS
+#
+# Este módulo detecta privilégios administrativos amplos
+# (ALL=(ALL) ou permissões equivalentes).
+#
+# NÃO interpreta completamente a gramática sudoers:
+# - Aliases complexos
+# - Cmnd_Alias específicos
+# - Restrições de host
+# - RunAs complexos
+#
+# Foco: detectar contas com capacidade administrativa ampla.
+############################################################
 
 in_array(){
 	local v pat
@@ -69,12 +114,25 @@ in_array(){
 	return 1
 }
 
-# Gather passwd entries
+# Coleta entradas de passwd (compatível com LDAP/SSSD via getent)
 mapfile -t PASSWD_LINES < <(getent passwd)
 
-# CONTROL 1 — IDENTIFICAÇÃO DE USUÁRIOS HUMANOS
+# ############################################################
+# CONTROLE 1 — IDENTIFICAÇÃO DE USUÁRIOS HUMANOS
+#
+# Pergunta:
+# Quais contas representam usuários humanos ativos?
+#
+# Critério:
+# - UID >= HUMAN_UID_MIN
+# - (Opcionalmente <= HUMAN_UID_MAX)
+# - Shell interativa válida
+# - Diretório home existente
+#
+# Objetivo:
+# Separar identidade humana de contas de serviço.
+# ############################################################
 human_users=()
-# prefer interactive-shell as main signal for human accounts; UID lower bound still applied
 is_interactive_shell(){
 	local s="$1"
 	in_array "$s" "${SHELL_WHITELIST[@]}"
@@ -94,10 +152,22 @@ for line in "${PASSWD_LINES[@]}"; do
 	fi
 done
 
-# CONTROL 2 — IDENTIFICAÇÃO DE USUÁRIOS ADMINISTRATIVOS
+# ############################################################
+# CONTROLE 2 — IDENTIFICAÇÃO DE USUÁRIOS ADMINISTRATIVOS
+#
+# Pergunta:
+# Quais contas possuem privilégio administrativo?
+#
+# Critério:
+# - Membros de grupos sudo ou wheel
+# - Entradas explícitas amplas em sudoers
+#
+# Objetivo:
+# Identificar contas com capacidade de elevação de privilégio.
+# ############################################################
 declare -A admin_set=()
 
-# Members of common admin groups
+# Membros de grupos administrativos comuns
 for g in sudo wheel; do
 	if getent group "$g" >/dev/null 2>&1; then
 		members=$(getent group "$g" | awk -F: '{print $4}')
@@ -109,7 +179,7 @@ for g in sudo wheel; do
 	fi
 done
 
-# Parse /etc/sudoers and /etc/sudoers.d for explicit user or %group entries
+# Analisa /etc/sudoers e /etc/sudoers.d para entradas de usuário ou %grupo
 sudoers_files=(/etc/sudoers)
 if [ -d /etc/sudoers.d ]; then
 	while IFS= read -r -d $'\0' f; do sudoers_files+=("$f"); done < <(find /etc/sudoers.d -type f -print0 2>/dev/null || true)
@@ -117,7 +187,7 @@ fi
 
 for f in "${sudoers_files[@]}"; do
 	[ -r "$f" ] || continue
-	# groups referenced as %group
+	# grupos referenciados como %group
 	while read -r gline; do
 		grp=$(sed -E 's/.*%([A-Za-z0-9_\-]+).*/\1/' <<<"$gline")
 		if [ -n "$grp" ]; then
@@ -127,32 +197,43 @@ for f in "${sudoers_files[@]}"; do
 		fi
 	done < <(grep -E '(^|[^#])%[A-Za-z0-9_\-]+' "$f" 2>/dev/null || true)
 
-	# explicit user lines like: someuser ALL=(ALL) NOPASSWD: ALL
+	# linhas de usuário explícitas, ex.: someuser ALL=(ALL) NOPASSWD: ALL
 	while read -r uline; do
 		user=$(sed -E 's/^([^#[:space:]]+).*/\1/' <<<"$uline")
 		if [ -n "$user" ]; then admin_set["$user"]=1; fi
 	done < <(grep -E '^[[:alnum:]._-]+[[:space:]]+ALL\s*=\(' "$f" 2>/dev/null || true)
 done
 
-# Turn admin_set into array
+# Converte admin_set em array
 admin_users=()
 for u in "${!admin_set[@]}"; do
 	admin_users+=("$u")
 done
 
-# Optionally write current admin list to baseline file (useful for bootstrapping)
+# Opcional: grava a lista atual de administradores em um arquivo baseline (útil para bootstrap)
 if [ -n "$WRITE_BASELINE" ]; then
 	printf '%s
 ' "${admin_users[@]}" > "$WRITE_BASELINE"
 fi
 
-# CONTROL 3 — VALIDATION AGAINST BASELINE (if provided)
+# ############################################################
+# CONTROLE 3 — VALIDAÇÃO CONTRA BASELINE
+#
+# Pergunta:
+# Os administradores atuais estão aderentes ao baseline?
+#
+# Critério:
+# - Detectar administradores não autorizados
+# - Detectar administradores esperados ausentes
+#
+# Objetivo:
+# Garantir controle formal sobre privilégio administrativo.
+# ############################################################
 authorized_admins=()
 unauthorized_admins=()
 missing_admins=()
 if [ -n "$BASELINE_FILE" ] && [ -r "$BASELINE_FILE" ]; then
 	mapfile -t authorized_admins < <(sed -E 's/#.*//' "$BASELINE_FILE" | sed '/^\s*$/d')
-	# build sets
 	declare -A base_set=()
 	for u in "${authorized_admins[@]}"; do base_set["$u"]=1; done
 	for u in "${admin_users[@]}"; do
@@ -167,7 +248,26 @@ if [ -n "$BASELINE_FILE" ] && [ -r "$BASELINE_FILE" ]; then
 	done
 fi
 
-# CONTROL 4 — DETECTION OF ANOMALIES
+# ############################################################
+# CONTROLE 4 — DETECÇÃO DE ANOMALIAS
+#
+# Subcontroles:
+#
+# 1) Múltiplas contas com UID 0
+#    - CRITICAL se existir mais de uma conta UID 0
+#
+# 2) Número excessivo de administradores
+#    - WARNING se ultrapassar ADMIN_MAX
+#
+# 3) Conta de sistema com shell interativa
+#    - WARNING se UID < HUMAN_UID_MIN e shell interativa
+#
+# 4) Conta com senha vazia em /etc/shadow
+#    - CRITICAL se detectado
+#
+# Objetivo:
+# Detectar desvios graves de política de identidade.
+# ############################################################
 anomalies=()
 highest_severity=0
 
@@ -178,45 +278,45 @@ add_anomaly(){
 	if [ "$sev" = "WARNING" ] && [ "$highest_severity" -lt 1 ]; then highest_severity=1; fi
 }
 
-# 1) UID 0 besides root
+# 1) UID 0 além do root
 uids0=()
 for line in "${PASSWD_LINES[@]}"; do
 	IFS=: read -r username passwd uid gid gecos home shell <<<"$line"
 	if [ "$uid" = "0" ]; then uids0+=("$username"); fi
 done
 if [ "${#uids0[@]}" -gt 1 ]; then
-	add_anomaly "CRITICAL" "Multiple UID 0 accounts: ${uids0[*]}"
+	add_anomaly "CRITICAL" "Múltiplas contas com UID 0: ${uids0[*]}"
 fi
 
-# 2) Too many admin users
+# 2) Excesso de contas administrativas
 if [ "${#admin_users[@]}" -gt "$ADMIN_MAX" ]; then
-	add_anomaly "WARNING" "${#admin_users[@]} admin accounts (threshold $ADMIN_MAX)"
+	add_anomaly "WARNING" "${#admin_users[@]} contas administrativas (limite $ADMIN_MAX)"
 fi
 
 # 3) System accounts with interactive shell
 for line in "${PASSWD_LINES[@]}"; do
 	IFS=: read -r username passwd uid gid gecos home shell <<<"$line"
 	if is_interactive_shell "$shell"; then
-		# Consider a system account interactive anomaly only when UID is below human threshold
-		# and it's not root (root is expected to have UID 0 and may have interactive shell)
+		# Considera anomalia de conta de sistema com shell interativa somente quando UID está abaixo
+		# do limite humano e não for root (root normalmente tem UID 0 e pode ter shell interativa)
 		if (( uid < HUMAN_UID_MIN )) && [ "$username" != "root" ]; then
-			add_anomaly "WARNING" "System account with interactive shell: $username (UID $uid, shell $shell)"
+			add_anomaly "WARNING" "Conta de sistema com shell interativa: $username (UID $uid, shell $shell)"
 		fi
 	fi
 done
 
-# 4) Accounts without password (needs /etc/shadow)
+# 4) Contas sem senha (requer /etc/shadow)
 if [ -r /etc/shadow ]; then
 	while IFS=: read -r user pass rest; do
 		if [ -z "$pass" ]; then
-			add_anomaly "CRITICAL" "Account with empty password field in /etc/shadow: $user"
+			add_anomaly "CRITICAL" "Conta com campo de senha vazio em /etc/shadow: $user"
 		fi
 	done < /etc/shadow
 else
 	if [ "$(id -u)" -ne 0 ]; then
-		add_anomaly "INFO" "Running unprivileged; skipping /etc/shadow checks"
+		add_anomaly "INFO" "Executando sem privilégios; pulando checagem de /etc/shadow"
 	else
-		add_anomaly "WARNING" "Cannot read /etc/shadow; skipping password checks"
+		add_anomaly "WARNING" "Não é possível ler /etc/shadow; pulando checagem de senhas"
 	fi
 fi
 
@@ -226,20 +326,35 @@ log_line(){
 	printf '%s [%s] %s\n' "$(date --rfc-3339=seconds 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")" "$sev" "$msg"
 }
 
-# Output logs: uma linha por controle/anomalia
-log_line "INFO" "Human users: ${#human_users[@]}"
+# ############################################################
+# LOG E SAÍDA
+#
+# O módulo:
+# - Registra resumo de usuários humanos
+# - Registra administradores
+# - Lista anomalias individualmente
+# - Retorna exit code:
+#     0 = apenas INFO
+#     1 = WARNING presente
+#     2 = CRITICAL presente
+#
+# Esse exit code deve ser consolidado pelo main.sh.
+# ############################################################
+	log_line "INFO" "Usuários humanos: ${#human_users[@]}"
 if [ ${#human_users[@]} -gt 0 ]; then
-	log_line "INFO" "Human user list: ${human_users[*]}"
+	human_csv=$(IFS=, ; echo "${human_users[*]}")
+		log_line "INFO" "Lista de usuários humanos: ${human_csv}"
 fi
-log_line "INFO" "Admin users: ${#admin_users[@]}"
+	log_line "INFO" "Administradores: ${#admin_users[@]}"
 if [ ${#admin_users[@]} -gt 0 ]; then
-	log_line "INFO" "Admin user list: ${admin_users[*]}"
+	admin_csv=$(IFS=, ; echo "${admin_users[*]}")
+		log_line "INFO" "Lista de administradores: ${admin_csv}"
 fi
 if [ -n "$BASELINE_FILE" ]; then
-	log_line "INFO" "Unauthorized admins: ${#unauthorized_admins[@]}"
-	log_line "INFO" "Missing expected admins: ${#missing_admins[@]}"
+		log_line "INFO" "Administradores não autorizados: ${#unauthorized_admins[@]}"
+		log_line "INFO" "Administradores esperados ausentes: ${#missing_admins[@]}"
 fi
-log_line "INFO" "Anomalies: ${#anomalies[@]}"
+	log_line "INFO" "Anomalias: ${#anomalies[@]}"
 for a in "${anomalies[@]}"; do
 	sev=${a%%:*}
 	msg=${a#*: }
