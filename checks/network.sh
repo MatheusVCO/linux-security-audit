@@ -180,7 +180,11 @@ check_firewall_policy() {
 	# nft
 	if command -v nft >/dev/null 2>&1; then
 		# check for a filter table with input chain policy
-		policy=$(nft list ruleset 2>/dev/null | grep -E "chain input" -A2 | grep -o "policy (accept|drop|reject)" || true)
+		# Avoid using grep -A; some greps (BusyBox) complain about it.
+		policy=$(nft list ruleset 2>/dev/null |
+			awk '/chain input/ {found=1; next}
+			 found && /policy/ {print; exit}' |
+			grep -o "policy (accept|drop|reject)" || true)
 		if echo "$policy" | grep -qi "drop\|reject"; then
 			net_log INFO "${SCRIPT_NAME^^}: Política de input do nftables é restritiva"
 		else
