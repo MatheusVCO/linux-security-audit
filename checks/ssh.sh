@@ -20,6 +20,11 @@
 # - O main.sh deve consolidar a severidade global
 ############################################################
 
+
+# Inclui funções utilitárias comuns para compatibilidade
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
+
 set -euo pipefail
 
 ############################################################
@@ -33,11 +38,26 @@ set -euo pipefail
 # O módulo mantém a maior severidade encontrada.
 ############################################################
 
+
+# Usa funções do common.sh para mensagens
 log() {
     local level="${1:-INFO}" msg="${2:-}"
     local ts
-    ts=$(date --rfc-3339=seconds 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
-    printf "%s [%s] %s\n" "$ts" "$level" "$msg"
+    if command_exists date; then
+        ts=$(date --rfc-3339=seconds 2>/dev/null || date "+%Y-%m-%d %H:%M:%S")
+    else
+        ts=$(date)
+    fi
+    case "$level" in
+        CRITICAL)
+            error_exit "$msg" ;; # error_exit já faz exit
+        WARNING)
+            warn "$msg" ;;
+        INFO|OK)
+            info "$msg" ;;
+        *)
+            echo "$ts [$level] $msg" ;;
+    esac
 }
 
 severity=0
@@ -213,12 +233,13 @@ main() {
 
     local active=no level_srv msg_srv
 
-    if command -v systemctl >/dev/null 2>&1; then
+
+    if command_exists systemctl; then
         if systemctl is-active --quiet sshd 2>/dev/null || systemctl is-active --quiet ssh 2>/dev/null; then
             active=yes
         fi
     else
-        if pgrep -x sshd >/dev/null 2>&1; then
+        if command_exists pgrep && pgrep -x sshd >/dev/null 2>&1; then
             active=yes
         fi
     fi

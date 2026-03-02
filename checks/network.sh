@@ -1,4 +1,9 @@
+
 #!/bin/bash
+
+# Inclui funções utilitárias comuns para compatibilidade
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
 
 SCRIPT_NAME="network"
 
@@ -15,21 +20,22 @@ net_log() {
 	fi
 
 	# obtém timestamp ISO com timezone, substitui T por espaço
-	ts=$(date --iso-8601=seconds 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
-	ts=${ts/T/ }
-
-	out="$ts [${sev}] $raw"
-
-	if type -t log >/dev/null 2>&1; then
-		def=$(declare -f log 2>/dev/null || true)
-		if echo "$def" | grep -q "net_log"; then
-			echo "$out"
-		else
-			log "$out"
-		fi
+	if command_exists date; then
+		ts=$(date --iso-8601=seconds 2>/dev/null || date -u "+%Y-%m-%dT%H:%M:%SZ")
 	else
-		echo "$out"
+		ts=$(date)
 	fi
+	ts=${ts/T/ }
+	case "$sev" in
+		CRITICAL)
+			error_exit "$raw" ;; # error_exit já faz exit
+		WARNING)
+			warn "$raw" ;;
+		INFO|OK)
+			info "$raw" ;;
+		*)
+			echo "$ts [$sev] $raw" ;;
+	esac
 }
 
 set_max_severity() {

@@ -19,7 +19,11 @@
 # - Valida contra baseline opcional
 # - Registra anomalias estruturadas em log
 # - Retorna exit code baseado na maior severidade encontrada
+
 ############################################################
+# Inclui funções utilitárias comuns para compatibilidade
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/../lib/common.sh"
 
 set -euo pipefail
 
@@ -105,6 +109,10 @@ NOLOGIN_PATTERNS=(/sbin/nologin /usr/sbin/nologin /bin/false /usr/bin/false)
 # Foco: detectar contas com capacidade administrativa ampla.
 ############################################################
 
+
+# Usa função command_exists do common.sh se necessário
+
+# Função para verificar se valor está em array (compatível)
 in_array(){
 	local v pat
 	v="$1"; shift
@@ -114,7 +122,11 @@ in_array(){
 	return 1
 }
 
+
 # Coleta entradas de passwd (compatível com LDAP/SSSD via getent)
+if ! command_exists getent; then
+	error_exit "O comando 'getent' não está disponível."
+fi
 mapfile -t PASSWD_LINES < <(getent passwd)
 
 # ############################################################
@@ -321,9 +333,17 @@ else
 fi
 
  
+
+# Usa função info/warn/error_exit do common.sh para mensagens
 log_line(){
 	local sev="$1"; shift; local msg="$*"
-	printf '%s [%s] %s\n' "$(date --rfc-3339=seconds 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")" "$sev" "$msg"
+	local timestamp
+	if command_exists date; then
+		timestamp="$(date --rfc-3339=seconds 2>/dev/null || date "+%Y-%m-%d %H:%M:%S")"
+	else
+		timestamp="$(date)"
+	fi
+	printf '%s [%s] %s\n' "$timestamp" "$sev" "$msg"
 }
 
 # ############################################################
