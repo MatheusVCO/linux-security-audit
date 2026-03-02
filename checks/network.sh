@@ -272,7 +272,7 @@ run_checks() {
 	# take snapshots of dynamic state once to keep checks consistent
 	mapfile -t SS_SNAPSHOT < <(ss -tulnpo 2>/dev/null || ss -tuln 2>/dev/null)
 	# persiste snapshot baseline para detecção de mudanças
-	baseline_file="report/network_ss_baseline.txt"
+	baseline_file="$SCRIPT_DIR/../report/network_ss_baseline.txt"
 	mkdir -p "$(dirname "$baseline_file")"
 	if [ -f "$baseline_file" ]; then
 		mapfile -t OLD_SS_SNAPSHOT < "$baseline_file"
