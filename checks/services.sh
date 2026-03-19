@@ -3,7 +3,6 @@
 # Inclui funções utilitárias comuns para compatibilidade
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
-#!/bin/bash
 
 ############################################################
 # MÓDULO: SERVICES AUDIT
@@ -11,12 +10,6 @@ source "$SCRIPT_DIR/../lib/common.sh"
 # Objetivo:
 # Avaliar serviços ativos no sistema, verificando
 # aderência ao princípio de menor superfície de ataque.
-	if ! command_exists systemctl; then
-		svc_log WARNING "systemctl não disponível. Não é possível listar serviços ativos."
-		set_max_severity WARNING
-		return
-	fi
-	mapfile -t active_services < <(systemctl list-units --type=service --state=active --no-pager --plain 2>/dev/null | grep -v "^UNIT " | grep -v "^[0-9].*loaded" | awk '{print $1}' | grep -v "^$" | sed 's/\.service$//')
 # Risco Mitigado:
 # - Serviços desnecessários em execução
 # - Serviços habilitados para iniciar automaticamente
@@ -26,23 +19,11 @@ source "$SCRIPT_DIR/../lib/common.sh"
 # Escopo:
 # Este módulo analisa:
 # - Serviços ativos no momento
-	if ! command_exists systemctl; then
-		svc_log WARNING "systemctl não disponível. Não é possível listar serviços habilitados."
-		set_max_severity WARNING
-		return
-	fi
-	mapfile -t enabled_services < <(systemctl list-unit-files --type=service --state=enabled --no-pager --plain 2>/dev/null | grep -v "^FILE" | grep -v "^[0-9].*unit files" | awk '{print $1}' | sed 's/\.service$//' | grep -v "^$")
 # - Serviços potencialmente sensíveis
 #
 # Observação:
 # Este módulo NÃO deve imprimir diretamente.
 # Toda saída deve utilizar a função de log central definida no main.
-	if ! command_exists systemctl; then
-		svc_log WARNING "systemctl não disponível. Não é possível listar serviços ativos."
-		set_max_severity WARNING
-		return
-	fi
-	mapfile -t active_services < <(systemctl list-units --type=service --state=active --no-pager --plain 2>/dev/null | grep -v "^UNIT " | grep -v "^[0-9].*loaded" | awk '{print $1}' | sed 's/\.service$//' | grep -v "^$")
 
 SCRIPT_NAME="services"
 
@@ -84,12 +65,8 @@ svc_log() {
 
 set_max_severity() {
 	# severidade: OK=0, INFO=1, WARNING=2, CRITICAL=3
-	if ! command_exists systemctl; then
-		svc_log WARNING "systemctl não disponível. Não é possível listar serviços em estado failed."
-		set_max_severity WARNING
-		return
-	fi
-	mapfile -t failed_services < <(systemctl list-units --type=service --state=failed --no-pager --plain 2>/dev/null | grep -v "^UNIT " | grep -v "^[0-9].*loaded" | awk '{print $1}' | sed 's/\.service$//' | grep -v "^$")
+	local sev_name="$1"
+	local sev
 	case "$sev_name" in
 		OK) sev=0 ;; INFO) sev=1 ;; WARNING) sev=2 ;; CRITICAL) sev=3 ;; *) sev=0 ;;
 	esac
@@ -101,12 +78,6 @@ set_max_severity() {
 
 report_exit_code() {
 	case "$SERVICES_MAX_SEVERITY" in
-	if ! command_exists systemctl; then
-		svc_log WARNING "systemctl não disponível. Não é possível verificar serviços masked."
-		set_max_severity WARNING
-		return
-	fi
-	local dangerous_services=("telnet" "rsh" "rlogin" "nis")
 		1) return 0 ;;
 		2) return 1 ;;
 		3) return 2 ;;
