@@ -153,7 +153,7 @@ check_firewall() {
 	fi
 
 	if [ $fw_active -eq 0 ]; then
-		if iptables-save 2>/dev/null | grep -q "-A"; then
+		if command -v iptables-save >/dev/null 2>&1 && iptables-save 2>/dev/null | grep -q -- '^-A '; then
 			net_log INFO "${SCRIPT_NAME^^}: Regras iptables encontradas"
 			fw_active=1
 		fi
