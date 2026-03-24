@@ -268,16 +268,23 @@ run_users_audit() {
 	log_entry "INFO" "MAIN" "========== INICIANDO AUDITORIA DE USUÁRIOS =========="
 	
 	local users_script="${SCRIPT_DIR}/checks/users.sh"
+	local baseline_file="${SCRIPT_DIR}/admins.baseline"
+	local users_args=()
 	
 	if [ ! -f "$users_script" ]; then
 		log_entry "WARNING" "MAIN" "Arquivo não encontrado: $users_script"
 		return 1
 	fi
+
+	if [ -r "$baseline_file" ]; then
+		users_args+=("-b" "$baseline_file")
+		log_entry "INFO" "MAIN" "Usando baseline de administradores: $baseline_file"
+	fi
 	
 	# Executa e captura saída
 	local users_output
 	local users_exit=0
-	users_output=$(bash "$users_script" 2>&1) || users_exit=$?
+	users_output=$(bash "$users_script" "${users_args[@]}" 2>&1) || users_exit=$?
 	
 	# Armazena logs do módulo
 	MODULE_LOGS["users"]="$users_output"

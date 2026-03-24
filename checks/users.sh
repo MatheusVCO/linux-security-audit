@@ -244,7 +244,10 @@ fi
 authorized_admins=()
 unauthorized_admins=()
 missing_admins=()
+baseline_check_enabled=0
+baseline_unreadable=0
 if [ -n "$BASELINE_FILE" ] && [ -r "$BASELINE_FILE" ]; then
+	baseline_check_enabled=1
 	mapfile -t authorized_admins < <(sed -E 's/#.*//' "$BASELINE_FILE" | sed '/^\s*$/d')
 	declare -A base_set=()
 	for u in "${authorized_admins[@]}"; do base_set["$u"]=1; done
@@ -258,6 +261,8 @@ if [ -n "$BASELINE_FILE" ] && [ -r "$BASELINE_FILE" ]; then
 			missing_admins+=("$u")
 		fi
 	done
+elif [ -n "$BASELINE_FILE" ]; then
+	baseline_unreadable=1
 fi
 
 # ############################################################
@@ -289,6 +294,21 @@ add_anomaly(){
 	if [ "$sev" = "CRITICAL" ]; then highest_severity=2; fi
 	if [ "$sev" = "WARNING" ] && [ "$highest_severity" -lt 1 ]; then highest_severity=1; fi
 }
+
+# Baseline com problemas de acesso
+if [ "$baseline_unreadable" -eq 1 ]; then
+	add_anomaly "WARNING" "Arquivo baseline informado não é legível: $BASELINE_FILE"
+fi
+
+# Baseline com divergências
+if [ "$baseline_check_enabled" -eq 1 ] && [ "${#unauthorized_admins[@]}" -gt 0 ]; then
+	unauth_csv=$(IFS=, ; echo "${unauthorized_admins[*]}")
+	add_anomaly "WARNING" "Administradores não autorizados no baseline: $unauth_csv"
+fi
+if [ "$baseline_check_enabled" -eq 1 ] && [ "${#missing_admins[@]}" -gt 0 ]; then
+	missing_csv=$(IFS=, ; echo "${missing_admins[*]}")
+	add_anomaly "WARNING" "Administradores esperados ausentes do baseline: $missing_csv"
+fi
 
 # 1) UID 0 além do root
 uids0=()
@@ -370,9 +390,11 @@ if [ ${#admin_users[@]} -gt 0 ]; then
 	admin_csv=$(IFS=, ; echo "${admin_users[*]}")
 		log_line "INFO" "Lista de administradores: ${admin_csv}"
 fi
-if [ -n "$BASELINE_FILE" ]; then
+if [ "$baseline_check_enabled" -eq 1 ]; then
 		log_line "INFO" "Administradores não autorizados: ${#unauthorized_admins[@]}"
 		log_line "INFO" "Administradores esperados ausentes: ${#missing_admins[@]}"
+elif [ "$baseline_unreadable" -eq 1 ]; then
+		log_line "WARNING" "Arquivo baseline informado não é legível: $BASELINE_FILE"
 fi
 	log_line "INFO" "Anomalias: ${#anomalies[@]}"
 for a in "${anomalies[@]}"; do
